@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>화양연화</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #eee; }
+
+  /* 배경 사진 */
+  #bg {
+    position: fixed; inset: 0;
+    background: url("images/mainpic.jpg") center / cover no-repeat;
+    z-index: 0;
+  }
+
+  /* 상단 흰 로고 (화면 가로 중앙) */
+  #logo {
+    position: fixed;
+    top:-7%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 34vw;            /* 로고 크기: 이 값만 바꾸면 됨 */
+    height: auto;
+    z-index: 1;
+    pointer-events: none;
+  }
+
+  /* 조각들이 그려지는 투명 캔버스 (클릭/드래그도 여기서 받음) */
+  #canvas {
+    position: fixed; inset: 0;
+    width: 100%; height: 100%;
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
+    z-index: 2;
+  }
+
+  /* 빨간 원: 캔버스(세부 이미지)보다 위, 화면 높이 전체를 채움 */
+  .dots {
+    position: fixed;
+    top: 0; bottom: 0;
+    display: grid;
+    grid-template-columns: repeat(2, 4.43vw);
+    grid-auto-rows: 4.43vw;
+    gap: 0.9vw;
+    align-content: center;   /* 세로 중앙 정렬 */
+    overflow: hidden;
+    z-index: 3;
+    pointer-events: none;    /* 원 위에서도 클릭/드래그가 캔버스로 전달됨 */
+  }
+  .dots.left  { left: 1.9vw; }
+  .dots.right { right: 2vw; }
+
+  .dot {
+    width: 4.43vw;
+    height: 4.43vw;
+    border-radius: 50%;
+    background: #a81c12;
+    opacity: 1;
+  }
+
+  /* 음악 재생 버튼 (하단 중앙) */
+  #musicBtn {
+    position: fixed;
+    bottom: 3vh;
+    left: 50%;
+    transform: translateX(-50%);
+    width: clamp(32px, 2.8vw, 44px);   /* 버튼 크기: 이 값만 바꾸면 됨 */
+    height: clamp(32px, 2.8vw, 44px);
+    padding: 0;
+    border-radius: 50%;
+    border: 1.5px solid rgba(255, 255, 255, 0.85);
+    background: rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(4px);
+    cursor: pointer;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s;
+  }
+  #musicBtn:hover { background: rgba(0, 0, 0, 0.6); }
+  #musicBtn svg { width: 42%; height: 42%; fill: #fff; }
+  #musicBtn .icon-pause { display: none; }
+  #musicBtn.playing .icon-play  { display: none; }
+  #musicBtn.playing .icon-pause { display: block; }
+</style>
+</head>
+<body>
+
+<div id="bg"></div>
+<img id="logo" src="images/logo.png" alt="in the mood for love 花樣年華">
+<canvas id="canvas"></canvas>
+
+<div class="dots left"  id="dotsLeft"></div>
+<div class="dots right" id="dotsRight"></div>
+
+<button id="musicBtn" aria-label="음악 재생/일시정지">
+  <svg class="icon-play" viewBox="0 0 24 24"><path d="M7 4.5v15a1 1 0 0 0 1.5.86l12-7.5a1 1 0 0 0 0-1.72l-12-7.5A1 1 0 0 0 7 4.5z"/></svg>
+  <svg class="icon-pause" viewBox="0 0 24 24"><rect x="5" y="4" width="5" height="16" rx="1"/><rect x="14" y="4" width="5" height="16" rx="1"/></svg>
+</button>
+
+<script>
+/* ========== 1. 설정 ========== */
+const IMAGES = [
+  "images/Frame 17.png",
+  "images/Frame 18.png",
+  "images/Frame 19.png",
+  "images/Frame 20.png",
+  "images/Frame 21.png",
+  "images/Frame 22.png",
+  "images/Frame 23.png",
+  "images/Frame 24.png",
+  "images/Frame 25.png",
+  "images/Frame 26.png",
+  "images/Frame 27.png",
+  "images/Frame 28.png",
+  "images/Frame 29.png",
+  "images/Frame 30.png",
+  "images/Frame 31.png",
+  "images/Frame 32.png"
+];
+
+const MUSIC_SRC    = encodeURI("Music Video.mp3");  // 음악 파일 경로 (html과 같은 폴더)
+const MUSIC_VOLUME = 0.7;                // 볼륨 (0 ~ 1)
+
+const LIFETIME_MS  = 7000;   // 조각이 생긴 뒤 몇 ms 뒤에 사라질지 (7000 = 7초)
+const FADE_MS      = 0;      // 사라지기 직전 서서히 투명해지는 시간 (0이면 툭 사라짐, 400 정도면 부드럽게)
+const MAX_ALIVE    = 200;    // 화면에 동시에 살아 있는 최대 조각 수 (넘으면 오래된 것부터 삭제)
+const DRAG_GAP     = 20;     // 드래그할 때 몇 px마다 하나씩 (작을수록 촘촘)
+const MAX_H_RATIO  = 0.25;   // 클릭 조각이 화면 높이의 몇 %를 넘지 않게
+const MAX_BITMAP_W = 400;    // 불러올 때 이 너비로 축소해서 보관 (작을수록 가벼움)
+const REVEAL_MS    = 120;    // 등장 효과(왼쪽→오른쪽으로 촤르륵) 걸리는 시간
+const REVEAL_STEPS = 6;      // 등장 효과 단계 수 (작을수록 거칠고 끊김)
+const DOT_COLORS   = ["#b01414", "#c0392b", "#d9a441", "#bfeadf"];
+
+/* 빨간 원 설정 */
+const DOT_PITCH_VW  = 5.33;         // 원 하나가 차지하는 세로 칸 (원 4.43vw + 간격 0.9vw)
+const DOT_OPACITY   = [0.2, 1.0];   // 투명도 범위 (20% ~ 100%)
+const DOT_CHANGE_MS = [500, 1800];  // 다음 투명도로 바뀌는 데 걸리는 시간 범위
+
+/* 크기 설정: 화면 너비 대비 비율 [최소, 최대] (높이는 원본 비율로 자동) */
+const SIZE = {
+  click: [0.06, 0.15],    // 클릭할 때
+  drag:  [0.025, 0.07]    // 드래그할 때
+};
+
+/* ========== 2. 준비 ========== */
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const DPR = Math.min(window.devicePixelRatio || 1, 1.5);   // 고해상도 화면에서도 부하 제한
+
+let W = 0, H = 0;
+let items = [];          // 지금 살아 있는 조각들
+let dirty = false;       // 다시 그려야 하는지
+let looping = false;
+let isDown = false;
+let lastX = 0, lastY = 0;
+let pendingMove = null;
+let ticking = false;
+
+const rand = (min, max) => Math.random() * (max - min) + min;
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+/* ========== 2-0. 배경 음악 + 재생 버튼 ========== */
+const bgm = new Audio(MUSIC_SRC);
+bgm.loop = true;
+bgm.volume = MUSIC_VOLUME;
+
+const musicBtn = document.getElementById("musicBtn");
+
+// 실제 재생 상태에 맞춰 버튼 아이콘 변경
+bgm.addEventListener("play",  () => musicBtn.classList.add("playing"));
+bgm.addEventListener("pause", () => musicBtn.classList.remove("playing"));
+bgm.addEventListener("error", () => console.error("음악 파일을 불러오지 못했어요:", MUSIC_SRC));
+
+// 버튼 클릭: 재생 <-> 일시정지
+musicBtn.addEventListener("click", () => {
+  if (bgm.paused) bgm.play().catch((err) => console.error("재생 실패:", err));
+  else bgm.pause();
+});
+
+// 들어오자마자 재생 시도 (브라우저가 막으면 버튼을 눌러야 재생됨)
+bgm.play().catch(() => {});
+
+/* ========== 2-1. 빨간 원 만들기 (화면 높이를 꽉 채움) + 각자 투명도 랜덤 변화 ========== */
+function buildDots() {
+  const pitchPx = window.innerWidth * DOT_PITCH_VW / 100;
+  const rows = Math.max(1, Math.floor(window.innerHeight / pitchPx));
+  ["dotsLeft", "dotsRight"].forEach(id => {
+    const container = document.getElementById(id);
+    container.innerHTML = "";
+    for (let i = 0; i < rows * 2; i++) {
+      const d = document.createElement("div");
+      d.className = "dot";
+      container.appendChild(d);
+      animateDot(d);
+    }
+  });
+}
+
+function animateDot(el) {
+  if (!el.isConnected) return;   // 다시 만들어져서 사라진 원은 멈춤
+  const dur = rand(...DOT_CHANGE_MS);
+  el.style.transition = `opacity ${dur}ms ease-in-out`;
+  el.style.opacity = rand(...DOT_OPACITY).toFixed(2);
+  setTimeout(() => animateDot(el), dur);
+}
+
+/* ========== 3. 이미지 미리 축소해서 보관 ========== */
+const bitmaps = [];
+
+IMAGES.forEach(src => {
+  const img = new Image();
+  img.onload = async () => {
+    let bmp = img;
+    try {
+      if (img.naturalWidth > MAX_BITMAP_W) {
+        // 너비만 지정하면 높이는 원본 비율로 자동 계산됨
+        bmp = await createImageBitmap(img, {
+          resizeWidth: MAX_BITMAP_W,
+          resizeQuality: "medium"
+        });
+      } else {
+        bmp = await createImageBitmap(img);
+      }
+    } catch (e) { bmp = img; }
+    bitmaps.push(bmp);
+  };
+  img.src = src;
+});
+
+const bw = (b) => b.width  || b.naturalWidth;
+const bh = (b) => b.height || b.naturalHeight;
+
+/* ========== 4. 캔버스 크기 ========== */
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width  = Math.round(W * DPR);
+  canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  buildDots();
+  dirty = true;
+  startLoop();
+}
+let resizeTimer;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(resize, 120);
+});
+
+/* ========== 5. 그리기 ========== */
+function drawItem(e, now) {
+  const age = now - e.t0;
+
+  // 등장 진행도 (단계별로 끊기게)
+  const raw = Math.max(0, Math.min(1, age / REVEAL_MS));
+  const p = Math.min(1, Math.ceil(raw * REVEAL_STEPS) / REVEAL_STEPS);
+  if (p <= 0) return;
+
+  // 사라지기 직전 서서히 투명하게 (FADE_MS가 0이면 사용 안 함)
+  if (FADE_MS > 0 && age > LIFETIME_MS - FADE_MS) {
+    ctx.globalAlpha = Math.max(0, (LIFETIME_MS - age) / FADE_MS);
+  }
+
+  if (p >= 1) {
+    ctx.drawImage(e.b, e.x, e.y, e.w, e.h);
+    for (const d of e.dots) {
+      ctx.fillStyle = d.c;
+      ctx.fillRect(d.x, d.y, d.s, d.s);
+    }
+  } else {
+    // 왼쪽에서 p만큼만 그리기
+    const sw = bw(e.b), sh = bh(e.b);
+    const dw = Math.round(e.w * p);
+    if (dw > 0) ctx.drawImage(e.b, 0, 0, sw * p, sh, e.x, e.y, dw, e.h);
+  }
+
+  ctx.globalAlpha = 1;
+}
+
+function draw(now) {
+  ctx.clearRect(0, 0, W, H);
+  for (const e of items) drawItem(e, now);
+}
+
+function frame() {
+  const now = performance.now();
+  let changed = dirty;
+  dirty = false;
+
+  // 시간이 지난 조각 제거
+  const before = items.length;
+  items = items.filter(e => now - e.t0 < LIFETIME_MS);
+  if (items.length !== before) changed = true;
+
+  // 등장 중이거나 페이드 중인 조각이 있으면 계속 다시 그림
+  for (const e of items) {
+    const age = now - e.t0;
+    if (age < REVEAL_MS || (FADE_MS > 0 && age > LIFETIME_MS - FADE_MS)) {
+      changed = true;
+      break;
+    }
+  }
+
+  if (changed) draw(now);
+
+  if (items.length) requestAnimationFrame(frame);
+  else looping = false;
+}
+
+function startLoop() {
+  if (!looping) { looping = true; requestAnimationFrame(frame); }
+}
+
+function addEntry(e) {
+  e.t0 = performance.now();
+  items.push(e);
+  if (items.length > MAX_ALIVE) items.shift();
+  dirty = true;
+  startLoop();
+}
+
+/* ========== 6. 클릭: 클릭한 자리에, 랜덤 크기 (비율 유지) ========== */
+function spawnRandom(px, py) {
+  if (!bitmaps.length) return;
+  const b = pick(bitmaps);
+  const ratio = bh(b) / bw(b);
+
+  let w = W * rand(...SIZE.click);
+  let h = w * ratio;
+  if (h > H * MAX_H_RATIO) {
+    h = H * MAX_H_RATIO;
+    w = h / ratio;
+  }
+  // 클릭한 지점이 조각의 중심이 되도록
+  const x = px - w / 2;
+  const y = py - h / 2;
+
+  const dots = [];
+  for (let i = 0; i < 4; i++) {
+    dots.push({
+      x: px + rand(-w * 0.8, w * 0.8),
+      y: py + rand(-h * 0.8, h * 0.8),
+      s: rand(5, 14),
+      c: pick(DOT_COLORS)
+    });
+  }
+  addEntry({ b, x, y, w, h, dots });
+}
+
+/* ========== 7. 드래그: 오류처럼 주르륵 (비율 유지) ========== */
+function spawnGlitch(px, py, dx, dy) {
+  if (!bitmaps.length) return;
+  const b = pick(bitmaps);
+  const ratio = bh(b) / bw(b);
+  const w = W * rand(...SIZE.drag);
+  const h = w * ratio;
+
+  const ox = dx * rand(0, 2) + rand(-20, 20);
+  const oy = dy * rand(0, 2) + rand(-20, 20);
+  const x = px + ox - w / 2;
+  const y = py + oy - h / 2;
+
+  const dots = [];
+  if (Math.random() > 0.5) {
+    dots.push({ x: px + rand(-70, 70), y: py + rand(-70, 70), s: rand(5, 14), c: pick(DOT_COLORS) });
+  }
+  addEntry({ b, x, y, w, h, dots });
+}
+
+/* ========== 8. 이벤트 ========== */
+canvas.addEventListener("pointerdown", (e) => {
+  isDown = true;
+  lastX = e.clientX;
+  lastY = e.clientY;
+  canvas.setPointerCapture(e.pointerId);
+  spawnRandom(e.clientX, e.clientY);
+});
+
+/* 프레임당 한 번만 처리, 빨리 움직여도 지나간 길을 따라 채움 */
+function processMove() {
+  ticking = false;
+  if (!isDown || !pendingMove) return;
+  const { x, y } = pendingMove;
+  let dx = x - lastX, dy = y - lastY;
+  let dist = Math.hypot(dx, dy);
+  let guard = 0;
+  while (dist >= DRAG_GAP && guard++ < 5) {
+    const nx = lastX + (dx / dist) * DRAG_GAP;
+    const ny = lastY + (dy / dist) * DRAG_GAP;
+    spawnGlitch(nx, ny, dx, dy);
+    lastX = nx; lastY = ny;
+    dx = x - lastX; dy = y - lastY;
+    dist = Math.hypot(dx, dy);
+  }
+}
+
+canvas.addEventListener("pointermove", (e) => {
+  if (!isDown) return;
+  pendingMove = { x: e.clientX, y: e.clientY };
+  if (!ticking) { ticking = true; requestAnimationFrame(processMove); }
+});
+
+const stop = () => { isDown = false; pendingMove = null; };
+canvas.addEventListener("pointerup", stop);
+canvas.addEventListener("pointercancel", stop);
+
+/* Backspace = 마지막 하나 지우기 / C = 전부 지우기 */
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Backspace" && items.length) {
+    items.pop();
+    dirty = true;
+    startLoop();
+  }
+  if (e.key.toLowerCase() === "c") {
+    items = [];
+    dirty = true;
+    startLoop();
+  }
+});
+
+resize();
+</script>
+</body>
+</html>
